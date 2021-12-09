@@ -10,8 +10,8 @@ import glob
 from PIL import Image
 import cv2
 from os.path import dirname, join
-# current_dir = dirname(__file__)
 import os
+
 current_dir = os.path.dirname(os.path.realpath(__file__))
 
 from torch.utils.tensorboard import SummaryWriter
