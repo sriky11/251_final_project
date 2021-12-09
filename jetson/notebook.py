@@ -6,6 +6,7 @@ from PIL import Image
 from torchvision import transforms
 from grad_cam import BackPropagation
 import time 
+import matplotlib.pyplot as plt
 from IPython import display
 import threading
 import vlc
@@ -47,6 +48,75 @@ cface=0
 imgMarkedup=0
 imgDisplay=0
 
+
+
+# reference https://docs.opencv.org/3.0-beta/doc/py_tutorials/py_gui/py_video_display/py_video_display.html
+import numpy as np
+import cv2
+import paho.mqtt.client as mqtt 
+import pickle
+import time
+
+#LOCAL_MQTT_HOST="mosquitto"
+#LOCAL_MQTT_HOST="mosquitto-service"
+LOCAL_MQTT_HOST="localhost"
+LOCAL_MQTT_PORT=1883
+LOCAL_MQTT_TOPIC="face_detector_topic"
+
+# Create callback functions
+def on_connect_local(client, userdata, flags, rc):
+    print("Connected to local broker with rc: " + str(rc))
+
+def on_publish_local(client, userdata, result):
+    print("Data publlished")
+
+# Create mqtt client
+local_mqttclient = mqtt.Client()
+local_mqttclient.on_connect = on_connect_local
+local_mqttclient.on_publish = on_publish_local
+local_mqttclient.connect(LOCAL_MQTT_HOST, LOCAL_MQTT_PORT, 60)
+
+
+
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+!pip3 install AWSIoTPythonSDK
+import time as t
+import json
+import AWSIoTPythonSDK.MQTTLib as AWSIoTPyMQTT
+
+# Define ENDPOINT, CLIENT_ID, PATH_TO_CERTIFICATE, PATH_TO_PRIVATE_KEY, PATH_TO_AMAZON_ROOT_CA_1, MESSAGE, TOPIC, and RANGE
+ENDPOINT = "a2o3601o47s8jg-ats.iot.us-west-2.amazonaws.com"
+CLIENT_ID = "testDevice"
+PATH_TO_CERTIFICATE = ""
+PATH_TO_PRIVATE_KEY = ""
+PATH_TO_AMAZON_ROOT_CA_1 = ""
+MESSAGE = "Hello World"
+TOPIC = "device/1/data"
+DEVICEID = 1
+USERID="sri"
+LAT= 37.7893780
+LONG= -121.8949266
+RANGE = 1
+
+def pushToAWSIOT(msg):
+    myAWSIoTMQTTClient = AWSIoTPyMQTT.AWSIoTMQTTClient(CLIENT_ID)
+    myAWSIoTMQTTClient.configureEndpoint(ENDPOINT, 8883)
+    myAWSIoTMQTTClient.configureCredentials(PATH_TO_AMAZON_ROOT_CA_1, PATH_TO_PRIVATE_KEY, PATH_TO_CERTIFICATE)
+
+    myAWSIoTMQTTClient.connect()
+    print('Begin Publish')
+    for i in range (RANGE):
+        data = "{} [{}]".format(msg, i+1)
+        message = {"deviceID" : DEVICEID, "userID" : USERID, "Lat": LAT, "Long": LONG, "message" : data}
+        myAWSIoTMQTTClient.publish(TOPIC, json.dumps(message), 1) 
+        print("Published: '" + json.dumps(message) + "' to the topic" + "' '")
+        t.sleep(0.1)
+    print('Publish End')
+    myAWSIoTMQTTClient.disconnect()
+    
+    
+    
 def preprocess(cap_image):
     global cface
     transform_test = transforms.Compose([
@@ -62,7 +132,7 @@ def preprocess(cap_image):
         cv2.rectangle(cap_image,(x,y),(x+w,y+h),(255,255,0),2)
         roi_gray = gray[y:y + h, x:x + w]
         roi_color = cap_image[y:y+h, x:x+w]
-        eyes = eye_cascade.detectMultiScale(roi_gray, scaleFactor=1.3, minNeighbors=20)
+        eyes = eye_cascade.detectMultiScale(roi_gray, scaleFactor=1.3, minNeighbors=20) 
         i=0
         for (ex,ey,ew,eh) in eyes:
             (x, y, w, h) = eyes[i]
@@ -71,7 +141,7 @@ def preprocess(cap_image):
             eye = cv2.resize(eye, shape)
             eyess.append([transform_test(Image.fromarray(eye).convert('L')), eye, cv2.resize(roi_color, (48,48))])
             i=i+1
-    cv2.imwrite('temp-images/img-markedup.jpg',cap_image)
+    cv2.imwrite('temp-images/img-markedup.jpg',cap_image)    
 
 def eye_status(eye, net):
     img = torch.stack([eye])
@@ -100,7 +170,7 @@ def drow(cap_image, model_name):
     checkpoint = torch.load(os.path.join('model', model_name), map_location=torch.device('cpu'))
     net.load_state_dict(checkpoint['net'])
     net.eval()
-
+    
     status = ""
     msg = ""
     preprocess(cap_image)
@@ -124,7 +194,10 @@ def drow(cap_image, model_name):
                     p.play()
         else:
             msg = f'Face detected, eyes open.'
-            p.stop()
+            local_mqttclient.publish(LOCAL_MQTT_TOPIC, msg, qos=0, retain=False)
+            pushToAWSIOT(msg)
+    
+            p.stop()        
     else:
         msg = f'Face detected, no eyes.'
         timerundrow= time.time()
@@ -135,9 +208,16 @@ def drow(cap_image, model_name):
     image = cv2.imread("temp-images/img-markedup.jpg")
     if image.size != 0:
         image = cv2.putText(image, msg, (50, 75), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 0, 0), 2, cv2.LINE_AA)
-        cv2.imwrite('temp-images/display.jpg',image)
-
-
+        #cv2.imwrite('temp-images/display.jpg',image)
+        
+        # Encode and publish to mqtt->  EC2 -> S3
+        ret, png = cv2.imencode('.png', image) 
+        message1 = pickle.dumps(png)
+        local_mqttclient.publish(LOCAL_MQTT_TOPIC, message1, qos=0, retain=False)
+        pushToAWSIOT(msg)
+        
+        
+        
 def main():
     while 1:
         global eyess
@@ -148,14 +228,6 @@ def main():
         if ret == True:
             func(cap_img, MyModel)
 
-def disp():
-    while 1:
-        try:
-            img = cv2.imread(current_dir+'/temp-images/display.jpg')
-            cv2.imshow(current_dir+'/temp-images/image',img)
-            k = cv2.waitKey(30) & 0xff
-        except:
-            ...
 
 
 cap = cv2.VideoCapture(0)
@@ -166,8 +238,4 @@ timebasedis= time.time()
 timerundrow= time.time()
 timerundis= time.time()
 
-d = threading.Thread(target=disp, name='disp')
-m = threading.Thread(target=main, name='main')
-
-m.start()
-d.start()
+main()
